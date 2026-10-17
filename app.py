@@ -1,59 +1,108 @@
+import streamlit as st
 import duckdb
 import pandas as pd
-import streamlit as st
+import numpy as np
 
 # Page Configuration
 st.set_page_config(
-    page_title="Enterprise BI & Operations Hub", layout="wide"
+    page_title="Enterprise BI & Analytics Platform",
+    page_icon="📊",
+    layout="wide"
 )
 
-st.title("🚀 Omnichannel Business Intelligence & Operations Hub")
-st.markdown(
-    "Centralized analytics platform integrating Marketing, Operations, and Financial Risk telemetry."
-)
+st.title("🚀 Enterprise BI & Automated Operations Data Hub")
+st.markdown("A unified analytics workspace integrating Marketing RFM, Financial Risk, Operations, and SaaS Retention.")
 
-# Initialize connection and run basic queries
+# Database & Data Setup
 @st.cache_resource
-def load_data():
-  con = duckdb.connect(database=":memory:")
-  # Re-inject sample data for the app view
-  con.execute("""
-        CREATE TABLE fact_transactions AS SELECT * FROM (
-            SELECT 'TXN_101' AS transaction_id, 'CUST_A' AS customer_id, TIMESTAMP '2026-09-01' AS order_date, 150.00 AS amount, 'Electronics' AS merchant_category, 0 AS is_international, 'Completed' AS order_status UNION ALL
-            SELECT 'TXN_102', 'CUST_B', TIMESTAMP '2026-09-05', 45.50, 'Grocery', 0, 'Completed' UNION ALL
-            SELECT 'TXN_103', 'CUST_A', TIMESTAMP '2026-09-15', 300.00, 'Electronics', 1, 'Completed' UNION ALL
-            SELECT 'TXN_104', 'CUST_C', TIMESTAMP '2026-09-20', 80.00, 'Dining', 0, 'Completed' UNION ALL
-            SELECT 'TXN_105', 'CUST_B', TIMESTAMP '2026-10-01', 210.00, 'Grocery', 0, 'Completed' UNION ALL
-            SELECT 'TXN_106', 'CUST_A', TIMESTAMP '2026-10-10', 120.00, 'Luxury', 1, 'Completed'
-        );
+def init_db():
+    con = duckdb.connect(database=':memory:')
+    
+    # 1. Marketing Data
+    np.random.seed(42)
+    customers = [f"CUST_{i:04d}" for i in range(1, 101)]
+    rfm_data = pd.DataFrame({
+        'customer_id': customers,
+        'recency': np.random.randint(1, 365, size=100),
+        'frequency': np.random.randint(1, 50, size=100),
+        'monetary': np.random.uniform(50.0, 5000.0, size=100).round(2)
+    })
+    con.register('raw_rfm', rfm_data)
+    con.execute("""
+        CREATE TABLE mart_customer_rfm AS 
+        SELECT customer_id, recency, frequency, monetary,
+               CASE 
+                   WHEN recency <= 30 AND frequency >= 20 THEN 'VIP'
+                   WHEN recency <= 90 THEN 'Active'
+                   ELSE 'At-Risk'
+               END AS rfm_segment
+        FROM raw_rfm
     """)
-  rfm_df = con.execute("""
-        WITH Snapshot AS (SELECT MAX(order_date) AS max_date FROM fact_transactions)
-        SELECT customer_id, (SELECT max_date FROM Snapshot) - MAX(order_date) AS recency_days, 
-               COUNT(DISTINCT transaction_id) AS frequency, ROUND(SUM(amount), 2) AS monetary 
-        FROM fact_transactions WHERE order_status = 'Completed' GROUP BY customer_id;
-    &quot;&quot;").df()
-  return rfm_df
 
+    # 2. Financial Fraud Data
+    transactions = pd.DataFrame({
+        'transaction_id': [f"TXN_{i:05d}" for i in range(1, 201)],
+        'customer_id': np.random.choice(customers, 200),
+        'amount': np.random.uniform(10.0, 2500.0, 200).round(2),
+        'is_international': np.random.choice([0, 1], 200, p=[0.85, 0.15])
+    })
+    con.register('raw_txns', transactions)
+    con.execute("""
+        CREATE TABLE stg_transactions AS 
+        SELECT transaction_id, customer_id, amount, is_international,
+               CASE 
+                   WHEN amount > 1000 AND is_international = 1 THEN 'High Risk'
+                   WHEN amount > 500 THEN 'Medium Risk'
+                   ELSE 'Low Risk'
+               END AS risk_level
+        FROM raw_txns
+    """)
+    
+    return con
 
-df_rfm = load_data()
+con = init_db()
 
 # Sidebar Navigation
-tab1, tab2 = st.tabs(
-    ["📊 Executive Overview", "👥 Customer RFM Segmentation"]
-)
+st.sidebar.header("Navigation & Filters")
+domain = st.sidebar.radio("Select Domain:", ["Executive Overview", "Marketing RFM", "Financial Risk"])
 
-with tab1:
-  st.header("Platform High-Level Performance")
-  col1, col2, col3 = st.columns(3)
-  col1.metric("Total Platform Revenue", f"${df_rfm['monetary'].sum():,.2f}")
-  col2.metric("Total Active Customers", len(df_rfm))
-  col3.metric("Average Customer Spend", f"${df_rfm['monetary'].mean():,.2f}")
+if domain == "Executive Overview":
+    st.header("📈 Executive Overview")
+    col1, col2, col3 = st.columns(3)
+    
+    total_cust = con.execute("SELECT COUNT(*) FROM mart_customer_rfm").fetchone()[0]
+    total_rev = con.execute("SELECT SUM(monetary) FROM mart_customer_rfm").fetchone()[0]
+    high_risk = con.execute("SELECT COUNT(*) FROM stg_transactions WHERE risk_level = 'High Risk'").fetchone()[0]
+    
+    col1.metric("Total Active Customers", f"{total_cust}")
+    col2.metric("Total Revenue", f"${total_rev:,.2f}")
+    col3.metric("High Risk Transactions", f"{high_risk}")
+    
+    st.markdown("---")
+    st.subheader("Customer Distribution by Segment")
+    df_segments = con.execute("SELECT rfm_segment, COUNT(*) as count FROM mart_customer_rfm GROUP BY rfm_segment").df()
+    st.bar_chart(df_segments.set_index('rfm_segment'))
 
-  st.subheader("Recent Transaction Analytics")
-  st.dataframe(df_rfm, use_container_width=True)
+elif domain == "Marketing RFM":
+    st.header("🎯 Marketing & RFM Segmentation")
+    segment_filter = st.sidebar.multiselect(
+        "Filter Segment:", 
+        ["VIP", "Active", "At-Risk"], 
+        default=["VIP", "Active", "At-Risk"]
+    )
+    
+    query = f"SELECT * FROM mart_customer_rfm WHERE rfm_segment IN ({','.join([repr(s) for s in segment_filter])})"
+    df_rfm = con.execute(query).df()
+    
+    st.dataframe(df_rfm, use_container_width=True)
 
-with tab2:
-  st.header("Customer Behavioral Analysis")
-  st.markdown("Detailed breakdown of customer recency, frequency, and spend.")
-  st.bar_chart(df_rfm.set_index("customer_id")["monetary"])
+elif domain == "Financial Risk":
+    st.header("🛡️ Financial Risk Analytics")
+    risk_filter = st.sidebar.selectbox("Risk Level:", ["All", "High Risk", "Medium Risk", "Low Risk"])
+    
+    if risk_filter == "All":
+        df_risk = con.execute("SELECT * FROM stg_transactions").df()
+    else:
+        df_risk = con.execute(f"SELECT * FROM stg_transactions WHERE risk_level = '{risk_filter}'").df()
+        
+    st.dataframe(df_risk, use_container_width=True)
